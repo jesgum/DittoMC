@@ -37,6 +37,13 @@ class Tune;
 class SignalInjector
 {
  public:
+  struct InjectionResult {
+    int mInjectedParticles = 0;
+    int mDecayProducts = 0;
+
+    int totalParticles() const { return mInjectedParticles + mDecayProducts; }
+  };
+
   SignalInjector(const std::string& fileName,
                  const std::vector<double>& activityEdges,
                  int finalStatus,
@@ -50,7 +57,7 @@ class SignalInjector
 
   // Append the injected particles starting from firstParticleIndex and return
   // the total number of particles added across all configured signal species.
-  int inject(TClonesArray& particles, int firstParticleIndex, int activityClass);
+  InjectionResult inject(TClonesArray& particles, int firstParticleIndex, int activityClass);
 
   // Helpers for constructing signal-card objects. The signalMass histogram is
   // the species registry: its X-axis labels are the PDG codes. Each registered

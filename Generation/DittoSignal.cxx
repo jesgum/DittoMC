@@ -20,7 +20,10 @@
 #include <TFile.h>
 #include <TH1D.h>
 #include <TH2D.h>
+#include <TParameter.h>
 #include <TParticle.h>
+
+#include <Pythia8/Pythia.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,11 +43,19 @@ namespace
 {
 
 constexpr double kTwoPi = 6.283185307179586476925286766559;
+constexpr std::uint64_t kDecaySeedOffset = 0xd1b54a32d192ed03ULL;
+constexpr std::uint64_t kMaxPythiaSeed = 900000000ULL;
 constexpr const char* kMassName = "signalMass";
+constexpr const char* kDecayName = "signalDecay";
 
 std::string objectName(const char* prefix, int pdg)
 {
   return std::string(prefix) + std::to_string(pdg);
+}
+
+int pythiaSeed(std::uint64_t seed)
+{
+  return static_cast<int>(seed % kMaxPythiaSeed) + 1;
 }
 
 bool nearlyEqual(double a, double b)
@@ -317,9 +328,7 @@ TH2D* SignalInjector::makePtHistogram(const Tune& tune,
   const int nActivity = static_cast<int>(activityEdges.size()) - 1;
   const std::string name = objectName("signalPt_", pdg);
   const std::string title = ";N_{ch} activity;p_{T} (GeV/c) (PDG " + std::to_string(pdg) + ")";
-  return new TH2D(name.c_str(), title.c_str(),
-                  nActivity, activityEdges.data(),
-                  static_cast<int>(ptEdges.size()) - 1, ptEdges.data());
+  return new TH2D(name.c_str(), title.c_str(), nActivity, activityEdges.data(), static_cast<int>(ptEdges.size()) - 1, ptEdges.data());
 }
 
 TH2D* SignalInjector::makeEtaHistogram(const Tune& tune,
@@ -336,9 +345,7 @@ TH2D* SignalInjector::makeEtaHistogram(const Tune& tune,
   const int nActivity = static_cast<int>(activityEdges.size()) - 1;
   const std::string name = objectName("signalEta_", pdg);
   const std::string title = ";N_{ch} activity;#eta (PDG " + std::to_string(pdg) + ")";
-  return new TH2D(name.c_str(), title.c_str(),
-                  nActivity, activityEdges.data(),
-                  static_cast<int>(etaEdges.size()) - 1, etaEdges.data());
+  return new TH2D(name.c_str(), title.c_str(), nActivity, activityEdges.data(), static_cast<int>(etaEdges.size()) - 1, etaEdges.data());
 }
 
 struct SignalInjector::Impl {
@@ -366,6 +373,16 @@ struct SignalInjector::Impl {
     std::unique_ptr<TFile> input(TFile::Open(fileName.c_str(), "READ"));
     if (!input || input->IsZombie()) {
       throw std::runtime_error("Ditto: could not open signal file " + fileName);
+    }
+
+    TParameter<int>* decayParameter = nullptr;
+    input->GetObject(kDecayName, decayParameter);
+    if (decayParameter) {
+      const int value = decayParameter->GetVal();
+      if (value != 0 && value != 1) {
+        throw std::runtime_error("Ditto: signalDecay must be either 0 or 1");
+      }
+      decaySignal = value != 0;
     }
 
     TH1D* massHistogram = nullptr;
@@ -450,17 +467,121 @@ struct SignalInjector::Impl {
     }
 
     sampledMultiplicities.resize(species.size(), 0);
+
+    if (decaySignal) {
+      configureDecayer(seed + kDecaySeedOffset);
+    }
   }
 
-  int inject(TClonesArray& particles,
-             int firstParticleIndex,
-             int activityClass)
+  void configureDecayer(std::uint64_t seed)
   {
+    decayer = std::make_unique<Pythia8::Pythia>();
+
+    if (!decayer->readString("ProcessLevel:all = off") ||
+        !decayer->readString("Random:setSeed = on") ||
+        !decayer->readString("Random:seed = " + std::to_string(pythiaSeed(seed))) ||
+        !decayer->readString("Print:quiet = on")) {
+      throw std::runtime_error("Ditto: could not configure PYTHIA signal decayer");
+    }
+
+    for (const auto& selected : species) {
+      if (!decayer->particleData.isParticle(selected.pdg)) {
+        throw std::runtime_error("Ditto: signal decay requested for unknown PYTHIA PDG " +
+                                 std::to_string(selected.pdg));
+      }
+    }
+
+    if (!decayer->init()) {
+      throw std::runtime_error("Ditto: PYTHIA signal decayer initialization failed");
+    }
+
+    Printf("Ditto: signal decays enabled with PYTHIA\n");
+  }
+
+  int decay(TClonesArray& particles,
+            int firstParticleIndex,
+            int nParents)
+  {
+    if (!decayer || nParents <= 0) {
+      return 0;
+    }
+
+    auto& event = decayer->event;
+    event.reset();
+    const int baseIndex = event.size();
+
+    for (int i = 0; i < nParents; ++i) {
+      const auto* particle = static_cast<const TParticle*>(particles.UncheckedAt(firstParticleIndex + i));
+      if (!particle) {
+        throw std::runtime_error("Ditto: missing injected particle before signal decay");
+      }
+
+      const int index = event.append(particle->GetPdgCode(),
+                                     1,
+                                     0,
+                                     0,
+                                     0,
+                                     0,
+                                     0,
+                                     0,
+                                     particle->Px(),
+                                     particle->Py(),
+                                     particle->Pz(),
+                                     particle->Energy(),
+                                     particle->GetCalcMass());
+      event[index].vProd(particle->Vx(), particle->Vy(), particle->Vz(), particle->T());
+    }
+
+    if (!decayer->moreDecays()) {
+      throw std::runtime_error("Ditto: PYTHIA signal decay failed");
+    }
+
+    const int nParticles = event.size() - baseIndex;
+    if (nParticles < nParents) {
+      throw std::runtime_error("Ditto: invalid PYTHIA signal decay record");
+    }
+    if (nParticles > std::numeric_limits<int>::max() - firstParticleIndex) {
+      throw std::runtime_error("Ditto: signal decay particle index overflow");
+    }
+
+    const int requiredSize = firstParticleIndex + nParticles;
+    if (requiredSize > particles.GetSize()) {
+      particles.Expand(requiredSize);
+    }
+
+    const auto rootIndex = [baseIndex, firstParticleIndex](int pythiaIndex) {
+      return pythiaIndex < baseIndex ? -1 : firstParticleIndex + pythiaIndex - baseIndex;
+    };
+
+    for (int i = baseIndex; i < event.size(); ++i) {
+      const auto& source = event[i];
+      auto* particle = static_cast<TParticle*>(particles.ConstructedAt(rootIndex(i)));
+
+      particle->SetPdgCode(source.id());
+      particle->SetStatusCode(source.isFinal() ? finalStatus : source.status());
+      particle->SetMother(0, rootIndex(source.mother1()));
+      particle->SetMother(1, rootIndex(source.mother2()));
+      particle->SetDaughter(0, rootIndex(source.daughter1()));
+      particle->SetDaughter(1, rootIndex(source.daughter2()));
+      particle->SetWeight(1.0f);
+      particle->SetCalcMass(source.m());
+      particle->SetMomentum(source.px(), source.py(), source.pz(), source.e());
+      particle->SetProductionVertex(source.xProd(), source.yProd(), source.zProd(), source.tProd());
+      particle->SetPolarisation(0.0, 0.0, 0.0);
+    }
+
+    return nParticles - nParents;
+  }
+
+  SignalInjector::InjectionResult inject(TClonesArray& particles,
+                                         int firstParticleIndex,
+                                         int activityClass)
+  {
+    SignalInjector::InjectionResult result;
     if (firstParticleIndex < 0) {
       throw std::runtime_error("Ditto: invalid first particle index for signal injection");
     }
-    if (activityClass < 0 ||
-        static_cast<std::size_t>(activityClass) >= nActivityClasses) {
+    if (activityClass < 0 || static_cast<std::size_t>(activityClass) >= nActivityClasses) {
       throw std::runtime_error("Ditto: invalid activity class for signal injection");
     }
 
@@ -479,7 +600,7 @@ struct SignalInjector::Impl {
     }
 
     if (totalSignal == 0) {
-      return 0;
+      return result;
     }
     if (totalSignal > std::numeric_limits<int>::max() - firstParticleIndex) {
       throw std::runtime_error("Ditto: injected particle index overflow");
@@ -521,11 +642,17 @@ struct SignalInjector::Impl {
       }
     }
 
-    return totalSignal;
+    result.mInjectedParticles = totalSignal;
+    if (decaySignal) {
+      result.mDecayProducts = decay(particles, firstParticleIndex, totalSignal);
+    }
+    return result;
   }
 
   int finalStatus = 1;
   std::mt19937_64 rng;
+  bool decaySignal = false;
+  std::unique_ptr<Pythia8::Pythia> decayer;
   std::size_t nActivityClasses = 0;
   std::vector<SpeciesData> species;
   std::vector<int> sampledMultiplicities;
@@ -542,9 +669,9 @@ SignalInjector::SignalInjector(const std::string& fileName,
 
 SignalInjector::~SignalInjector() = default;
 
-int SignalInjector::inject(TClonesArray& particles,
-                           int firstParticleIndex,
-                           int activityClass)
+SignalInjector::InjectionResult SignalInjector::inject(TClonesArray& particles,
+                                                       int firstParticleIndex,
+                                                       int activityClass)
 {
   return mImpl->inject(particles, firstParticleIndex, activityClass);
 }

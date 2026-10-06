@@ -72,3 +72,6 @@ doc:
 
 doc-open: doc
 	xdg-open docs/generated/html/index.html
+
+signal: install
+	root -l -b -q Generation/macros/makeSignalCardFromDQ.C

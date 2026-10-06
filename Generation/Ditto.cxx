@@ -1430,11 +1430,14 @@ const EventInfo& Generator::generate()
   // Nch; it never resamples activity and does not alter the conditioning
   // variables of the background event.
   mEvent.mInjectedParticles = 0;
+  mEvent.mInjectedDecayProducts = 0;
   if (mSignalInjector) {
-    mEvent.mInjectedParticles = mSignalInjector->inject(*mParticles,
-                                                        particleIndex,
-                                                        mEvent.mActivityClass);
-    particleIndex += mEvent.mInjectedParticles;
+    const auto signal = mSignalInjector->inject(*mParticles,
+                                                particleIndex,
+                                                mEvent.mActivityClass);
+    mEvent.mInjectedParticles = signal.mInjectedParticles;
+    mEvent.mInjectedDecayProducts = signal.mDecayProducts;
+    particleIndex += signal.totalParticles();
   }
 
   if (detailed) {

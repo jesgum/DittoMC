@@ -61,18 +61,17 @@ struct EventInfo {
   std::uint64_t mEventNumber = 0;
 
   // Teacher beam configuration carried by the tune / generator card.
-  int mBeamIdA = 0;
-  int mBeamIdB = 0;
-  double mSqrtSNN = 0.0;
+  int mBeamIdA = 0;      ///< PDG code of beam A, copied from the tune.
+  int mBeamIdB = 0;      ///< PDG code of beam B, copied from the tune.
+  double mSqrtSNN = 0.0; ///< Center-of-mass energy per nucleon pair, copied from the tune.
 
   // Exact event-level conditioning variables sampled from the tune.
-  int mConditioningNch = -1;
-  int mConditioningNSelected = -1;
-  int mActivityClass = -1;
+  int mConditioningNch = -1;       ///< Exact number of charged particles in the activity acceptance, sampled from the tune.
+  int mConditioningNSelected = -1; ///< Exact number of selected particles in the activity acceptance, sampled from the tune.
+  int mActivityClass = -1;         ///< Exact activity class sampled from the tune, corresponding to the conditioning Nch.
 
-  // Number of particles added by the optional signal overlay. The injected
-  // particles do not feed back into the background conditioning variables.
-  int mInjectedParticles = 0;
+  int mInjectedParticles = 0;     ///< Number of particles added by the optional signal overlay. The injected particles do not feed back into the background conditioning variables.
+  int mInjectedDecayProducts = 0; ///< Number of decay products from the injected signal.
 };
 
 // Accumulated wall-clock timings. Values are stored in seconds.
